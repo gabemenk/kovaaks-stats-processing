@@ -12,7 +12,6 @@ DEFAULT_COLUMNS = [
     'Pause Count', 'Pause Duration', 'Resolution', 'Avg FPS', 'Resolution Scale',
     'DPI', 'FOVScale', 'Time Remaining', 'Total Overshots', 'Hit Count', 'Miss Count'
 ]
-MAX_UPLOAD_FILES = 500
 DEFAULT_STATS_FOLDER = 'stats'
 
 
@@ -65,6 +64,21 @@ def parse_local_folder(folder_path: str) -> tuple[list[pd.DataFrame], list[str]]
     return dataframes, errors
 
 
+def choose_local_folder(initial_dir: str = DEFAULT_STATS_FOLDER) -> str | None:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError:
+        return None
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+    folder = filedialog.askdirectory(initialdir=initial_dir, title='Select stats folder')
+    root.destroy()
+    return folder or None
+
+
 def build_final_dataframe(dataframes: list[pd.DataFrame]) -> pd.DataFrame:
     if not dataframes:
         raise ValueError('No valid stats files were provided')
@@ -75,11 +89,11 @@ def build_final_dataframe(dataframes: list[pd.DataFrame]) -> pd.DataFrame:
 
 
 def main() -> None:
-    st.set_page_config(page_title='KovaaK Stats Concatenator', layout='wide')
-    st.title('KovaaK Stats Concatenator')
+    st.set_page_config(page_title='Kovaak\'s Stats Files Concatenator', layout='wide')
+    st.title('Kovaak\'s Stats Files Concatenator')
 
     st.markdown(
-        'For large batches (10k+ files), use a local folder path. Upload mode is only for smaller file sets.'
+        'For large batches, select a local folder by browsing or pasting the path. Upload mode is available for small file sets.'
     )
 
     mode = st.radio('Processing mode', ['Local folder', 'Upload CSV files'], index=0, horizontal=True)
@@ -89,15 +103,30 @@ def main() -> None:
 
     local_errors = []
     if mode == 'Local folder':
-        folder_path = st.text_input('Local stats folder path', value=DEFAULT_STATS_FOLDER)
-        process_button = st.button('Process folder')
+        if 'local_folder_path_input' not in st.session_state:
+            st.session_state.local_folder_path_input = DEFAULT_STATS_FOLDER
 
-        if process_button:
-            try:
-                processed, local_errors = parse_local_folder(folder_path)
-            except Exception as exc:
-                st.error(f'Folder processing failed: {exc}')
-                return
+        folder_path = st.text_input(
+            'Local stats folder path',
+            value=st.session_state.local_folder_path_input,
+            key='local_folder_path_input',
+        )
+
+        def browse_folder_callback() -> None:
+            selected_folder = choose_local_folder(st.session_state.local_folder_path_input)
+            if selected_folder:
+                st.session_state.local_folder_path_input = selected_folder
+
+        browse_button, process_button = st.columns([1, 1])
+        with browse_button:
+            st.button('Browse folder', on_click=browse_folder_callback)
+        with process_button:
+            if st.button('Process folder'):
+                try:
+                    processed, local_errors = parse_local_folder(folder_path)
+                except Exception as exc:
+                    st.error(f'Folder processing failed: {exc}')
+                    return
     else:
         uploaded = st.file_uploader(
             'Upload CSV files from the stats folder',
@@ -109,10 +138,6 @@ def main() -> None:
             st.info('Upload files to begin processing.')
             return
 
-        if len(uploaded) > MAX_UPLOAD_FILES:
-            st.error(f'Too many CSV files uploaded ({len(uploaded)} > {MAX_UPLOAD_FILES}). Use Local folder mode instead.')
-            return
-
         for uploaded_file in uploaded:
             try:
                 processed.append(parse_stats_file(uploaded_file.name, uploaded_file.read()))
@@ -122,10 +147,6 @@ def main() -> None:
     if mode == 'Local folder' and local_errors:
         errors.extend(local_errors)
 
-    if errors:
-        st.error('Some files failed to process:')
-        for error in errors:
-            st.write(f'- {error}')
 
     if not processed:
         if mode == 'Local folder':
@@ -134,12 +155,13 @@ def main() -> None:
             st.warning('No valid files were uploaded.')
         return
 
-    with st.spinner('Merging data...'):
+    with st.spinner('Merging data.'):
         final_df = build_final_dataframe(processed)
+        final_df = final_df.sort_values('timestamp', ascending=False, na_position='last').reset_index(drop=True)
 
     total_attempted = len(processed) + len(errors)
     st.success(f'Processed {len(processed)} file(s), {len(errors)} errors, {total_attempted} attempted.')
-    st.dataframe(final_df.head(20))
+    st.dataframe(final_df)
 
     csv_bytes = final_df.to_csv(index=False).encode('utf-8')
     st.download_button(
