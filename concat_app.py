@@ -79,12 +79,38 @@ def choose_local_folder(initial_dir: str = DEFAULT_STATS_FOLDER) -> str | None:
     return folder or None
 
 
-def build_final_dataframe(dataframes: list[pd.DataFrame]) -> pd.DataFrame:
+def build_final_dataframe(dataframes: list[pd.DataFrame], existing_df: pd.DataFrame | None = None) -> pd.DataFrame:
     if not dataframes:
         raise ValueError('No valid stats files were provided')
-    final_df = pd.concat(dataframes, ignore_index=True)
-    existing_cols = [col for col in DEFAULT_COLUMNS if col in final_df.columns]
-    final_df_cleaned = final_df[existing_cols]
+
+    if existing_df is None:
+        combined_df = pd.concat(dataframes, ignore_index=True)
+    else:
+        existing_df_cleaned = existing_df.copy()
+        if 'timestamp' in existing_df_cleaned.columns:
+            existing_df_cleaned['timestamp'] = pd.to_datetime(existing_df_cleaned['timestamp'], errors='coerce')
+
+        combined_df = pd.concat([existing_df_cleaned, *dataframes], ignore_index=True, sort=False)
+
+    existing_cols = [col for col in DEFAULT_COLUMNS if col in combined_df.columns]
+    final_df_cleaned = combined_df[existing_cols]
+
+    # create a new column for accuracy
+    for column_name in ['Hit Count', 'Miss Count']:
+        final_df_cleaned[column_name] = pd.to_numeric(final_df_cleaned[column_name], errors='coerce')
+
+    total_shots = final_df_cleaned['Hit Count'] + final_df_cleaned['Miss Count']
+    accuracy = (final_df_cleaned['Hit Count'] / total_shots.replace(0, pd.NA)) * 100
+    final_df_cleaned['accuracy'] = accuracy.round(2)
+
+    # reorder columns
+    order = [
+        'Scenario', 'timestamp', 'Score', 'accuracy', 'Hit Count', 'Miss Count',   
+        'DPI', 'Sens Scale', 'Horiz Sens', 'Vert Sens'
+    ]
+    remaining_cols = [col for col in final_df_cleaned.columns if col not in order]
+    final_df_cleaned = final_df_cleaned[order + remaining_cols]
+
     return final_df_cleaned
 
 
@@ -93,16 +119,25 @@ def main() -> None:
     st.title('Kovaak\'s Stats Files Concatenator')
 
     st.markdown(
-        'For large batches, select a local folder by browsing or pasting the path. Upload mode is available for small file sets.'
+        'Use the create a CSV mode to create a new CSV file by selecting your local kovaaks stats folder. Use the append mode to add data to an existing CSV file.'
+    )
+    st.markdown(
+        'Append mode avoids reprocessing the entire folder, saving time, but is not recommended for large additional data.'
     )
 
-    mode = st.radio('Processing mode', ['Local folder', 'Upload CSV files'], index=0, horizontal=True)
+    mode = st.radio(
+        'Processing mode',
+        ['Create a new CSV', 'Append to existing CSV'],
+        index=0,
+        horizontal=True,
+    )
 
     processed = []
     errors = []
-
     local_errors = []
-    if mode == 'Local folder':
+    existing_df = None
+
+    if mode == 'Create a new CSV':
         if 'local_folder_path_input' not in st.session_state:
             st.session_state.local_folder_path_input = DEFAULT_STATS_FOLDER
 
@@ -121,21 +156,32 @@ def main() -> None:
         with browse_button:
             st.button('Browse folder', on_click=browse_folder_callback)
         with process_button:
-            if st.button('Process folder'):
+            if st.button('Create new CSV'):
                 try:
                     processed, local_errors = parse_local_folder(folder_path)
                 except Exception as exc:
                     st.error(f'Folder processing failed: {exc}')
                     return
     else:
+        existing_csv = st.file_uploader('Existing CSV file to append to', type='csv', accept_multiple_files=False)
         uploaded = st.file_uploader(
-            'Upload CSV files from the stats folder',
+            'Upload stats files to parse and append',
             type='csv',
             accept_multiple_files=True,
         )
 
+        if existing_csv is None:
+            st.info('Upload an existing CSV file to append to before selecting stats files.')
+            return
+
         if not uploaded:
-            st.info('Upload files to begin processing.')
+            st.info('Upload one or more stats files to begin appending.')
+            return
+
+        try:
+            existing_df = pd.read_csv(existing_csv)
+        except Exception as exc:
+            st.error(f'Failed to read the existing CSV: {exc}')
             return
 
         for uploaded_file in uploaded:
@@ -144,19 +190,21 @@ def main() -> None:
             except Exception as exc:
                 errors.append(f'{uploaded_file.name}: {exc}')
 
-    if mode == 'Local folder' and local_errors:
+    if mode == 'Create a new CSV' and local_errors:
         errors.extend(local_errors)
 
-
     if not processed:
-        if mode == 'Local folder':
+        if mode == 'Create a new CSV':
             st.warning('No files were processed from the folder.')
         else:
-            st.warning('No valid files were uploaded.')
+            st.warning('No valid files were uploaded to append.')
         return
 
     with st.spinner('Merging data.'):
-        final_df = build_final_dataframe(processed)
+        if mode == 'Create a new CSV':
+            final_df = build_final_dataframe(processed)
+        else:
+            final_df = build_final_dataframe(processed, existing_df)
         final_df = final_df.sort_values('timestamp', ascending=False, na_position='last').reset_index(drop=True)
 
     total_attempted = len(processed) + len(errors)
@@ -164,10 +212,11 @@ def main() -> None:
     st.dataframe(final_df)
 
     csv_bytes = final_df.to_csv(index=False).encode('utf-8')
+    output_name = 'all_stats_combined_cleaned.csv' if mode == 'Create a new CSV' else 'all_stats_combined_appended.csv'
     st.download_button(
         'Download merged CSV',
         data=csv_bytes,
-        file_name='all_stats_combined_cleaned.csv',
+        file_name=output_name,
         mime='text/csv',
     )
 
